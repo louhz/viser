@@ -1,3 +1,6 @@
+# for 4dgs and gui button manipulation 
+
+
 """Gaussian splats
 
 Viser includes a WebGL-based Gaussian splat renderer.
@@ -32,6 +35,10 @@ from plyfile import PlyData
 
 import viser
 from viser import transforms as tf
+
+
+
+
 
 
 class SplatFile(TypedDict):
@@ -150,29 +157,6 @@ def main(
         )
 
         remove_button = server.gui.add_button(f"Remove splat object {i}")
-
-        deform = server.gui.add_button(f"render object {i}")
-
-        @deform.on_click
-        def _(
-            _,
-            gs_handle=gs_handle,
-            t=0.0,
-            amplitude=0.1,
-            frequency=0.5,
-            speed=1.0,
-        ) -> None:
-            t += 0.1
-            new_centers = splat_data["centers"].copy()
-            new_centers[:, 1] += amplitude * np.sin(
-                2.0 * np.pi * frequency * new_centers[:, 0] + speed * t
-            )
-
-
-            # add a update method to the handle to update the centers and the sh
-            
-            gs_handle.update(centers=new_centers)
-
 
         @remove_button.on_click
         def _(_, gs_handle=gs_handle, remove_button=remove_button) -> None:
