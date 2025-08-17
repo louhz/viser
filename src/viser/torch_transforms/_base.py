@@ -1,9 +1,9 @@
 import abc
-from typing import ClassVar, Generic, Tuple, TypeVar, Union, overload
-
-import numpy as np
-import numpy.typing as npt
+from typing import ClassVar, Generic, Tuple, TypeVar, Union, overload, cast
 from typing_extensions import Self, final, get_args, override
+
+import torch
+from torch import Tensor
 
 
 class MatrixLieGroup(abc.ABC):
@@ -21,15 +21,7 @@ class MatrixLieGroup(abc.ABC):
     space_dim: ClassVar[int]
     """Dimension of coordinates that can be transformed."""
 
-    def __init__(
-        # Notes:
-        # - For the constructor signature to be consistent with subclasses, `parameters`
-        #   should be marked as positional-only. But this isn't possible in Python 3.7.
-        # - This method is implicitly overriden by the dataclass decorator and
-        #   should _not_ be marked abstract.
-        self,
-        parameters: np.ndarray,
-    ):
+    def __init__(self, parameters: Tensor):
         """Construct a group object from its underlying parameters."""
         raise NotImplementedError()
 
@@ -50,166 +42,88 @@ class MatrixLieGroup(abc.ABC):
 
     @overload
     def __matmul__(self, other: Self) -> Self: ...
-
     @overload
-    def __matmul__(
-        self, other: npt.NDArray[np.floating]
-    ) -> npt.NDArray[np.floating]: ...
+    def __matmul__(self, other: Tensor) -> Tensor: ...
 
-    def __matmul__(
-        self, other: Union[Self, npt.NDArray[np.floating]]
-    ) -> Union[Self, npt.NDArray[np.floating]]:
-        """Overload for the `@` operator.
-
-        Switches between the group action (`.apply()`) and multiplication
-        (`.multiply()`) based on the type of `other`.
-        """
-        if isinstance(other, np.ndarray):
+    def __matmul__(self, other: Union[Self, Tensor]) -> Union[Self, Tensor]:
+        """Switches between the group action (`.apply()`) and multiplication
+        (`.multiply()`) based on the type of `other`."""
+        if isinstance(other, Tensor):
             return self.apply(target=other)
         elif isinstance(other, MatrixLieGroup):
             assert self.space_dim == other.space_dim
             return self.multiply(other=other)  # type: ignore
         else:
-            assert False, f"Invalid argument type for `@` operator: {type(other)}"
+            raise TypeError(f"Invalid argument type for `@`: {type(other)}")
 
     # Factory.
 
     @classmethod
     @abc.abstractmethod
     def identity(
-        cls, batch_axes: Tuple[int, ...] = (), dtype: npt.DTypeLike = np.float64
+        cls, batch_axes: Tuple[int, ...] = (), dtype: torch.dtype = torch.float64
     ) -> Self:
-        """Returns identity element.
-
-        Args:
-            batch_axes: Any leading batch axes for the output transform.
-            dtype: Datatype for the output.
-
-        Returns:
-            Identity element.
-        """
+        """Returns identity element."""
 
     @classmethod
     @abc.abstractmethod
-    def from_matrix(cls, matrix: npt.NDArray[np.floating]) -> Self:
-        """Get group member from matrix representation.
-
-        Args:
-            matrix: Matrix representaiton.
-
-        Returns:
-            Group member.
-        """
+    def from_matrix(cls, matrix: Tensor) -> Self:
+        """Get group member from matrix representation."""
 
     # Accessors.
 
     @abc.abstractmethod
-    def as_matrix(self) -> npt.NDArray[np.floating]:
-        """Get transformation as a matrix. Homogeneous for SE groups."""
+    def as_matrix(self) -> Tensor:
+        """Get transformation as a matrix."""
 
     @abc.abstractmethod
-    def parameters(self) -> npt.NDArray[np.floating]:
+    def parameters(self) -> Tensor:
         """Get underlying representation."""
 
     # Operations.
 
     @abc.abstractmethod
-    def apply(self, target: npt.NDArray[np.floating]) -> npt.NDArray[np.floating]:
-        """Applies group action to a point.
-
-        Args:
-            target: Point to transform.
-
-        Returns:
-            Transformed point.
-        """
+    def apply(self, target: Tensor) -> Tensor:
+        """Applies group action to a point."""
 
     @abc.abstractmethod
     def multiply(self, other: Self) -> Self:
-        """Composes this transformation with another.
-
-        Returns:
-            self @ other
-        """
+        """Composes this transformation with another."""
 
     @classmethod
     @abc.abstractmethod
-    def exp(cls, tangent: npt.NDArray[np.floating]) -> Self:
-        """Computes `expm(wedge(tangent))`.
-
-        Args:
-            tangent: Tangent vector to take the exponential of.
-
-        Returns:
-            Output.
-        """
+    def exp(cls, tangent: Tensor) -> Self:
+        """Computes exponential map on tangent."""
 
     @abc.abstractmethod
-    def log(self) -> npt.NDArray[np.floating]:
-        """Computes `vee(logm(transformation matrix))`.
-
-        Returns:
-            Output. Shape should be `(tangent_dim,)`.
-        """
+    def log(self) -> Tensor:
+        """Computes logarithm map from group to tangent."""
 
     @abc.abstractmethod
-    def adjoint(self) -> npt.NDArray[np.floating]:
-        """Computes the adjoint, which transforms tangent vectors between tangent
-        spaces.
-
-        More precisely, for a transform `GroupType`:
-        ```
-        GroupType @ exp(omega) = exp(Adj_T @ omega) @ GroupType
-        ```
-
-        In robotics, typically used for transforming twists, wrenches, and Jacobians
-        across different reference frames.
-
-        Returns:
-            Output. Shape should be `(tangent_dim, tangent_dim)`.
-        """
+    def adjoint(self) -> Tensor:
+        """Computes the adjoint matrix."""
 
     @abc.abstractmethod
     def inverse(self) -> Self:
-        """Computes the inverse of our transform.
-
-        Returns:
-            Output.
-        """
+        """Computes the inverse transformation."""
 
     @abc.abstractmethod
     def normalize(self) -> Self:
-        """Normalize/projects values and returns.
-
-        Returns:
-            Normalized group member.
-        """
+        """Normalize/projection for numerical stability."""
 
     @classmethod
     @abc.abstractmethod
     def sample_uniform(
         cls,
-        rng: np.random.Generator,
+        rng: torch.Generator,
         batch_axes: Tuple[int, ...] = (),
-        dtype: npt.DTypeLike = np.float64,
+        dtype: torch.dtype = torch.float64,
     ) -> Self:
-        """Draw a uniform sample from the group. Translations (if applicable) are in the
-        range [-1, 1].
-
-        Args:
-            rng: numpy generator object.
-            batch_axes: Any leading batch axes for the output transforms. Each
-                sampled transform will be different.
-
-        Returns:
-            Sampled group member.
-        """
+        """Draw a uniform sample from the group."""
 
     @final
     def get_batch_axes(self) -> Tuple[int, ...]:
-        """Return any leading batch axes in contained parameters. If an array of shape
-        `(100, 4)` is placed in the wxyz field of an SO3 object, for example, this will
-        return `(100,)`."""
+        """Return any leading batch axes in contained parameters."""
         return self.parameters().shape[:-1]
 
 
@@ -221,37 +135,23 @@ ContainedSOType = TypeVar("ContainedSOType", bound=SOBase)
 
 
 class SEBase(Generic[ContainedSOType], MatrixLieGroup):
-    """Base class for special Euclidean groups.
-
-    Each SE(N) group member contains an SO(N) rotation, as well as an N-dimensional
-    translation vector.
-    """
-
-    # SE-specific interface.
+    """Base class for special Euclidean groups."""
 
     @classmethod
     @abc.abstractmethod
     def from_rotation_and_translation(
         cls,
         rotation: ContainedSOType,
-        translation: npt.NDArray[np.floating],
+        translation: Tensor,
     ) -> Self:
-        """Construct a rigid transform from a rotation and a translation.
-
-        Args:
-            rotation: Rotation term.
-            translation: translation term.
-
-        Returns:
-            Constructed transformation.
-        """
+        """Construct a rigid transform from rotation and translation."""
 
     @final
     @classmethod
     def from_rotation(cls, rotation: ContainedSOType) -> Self:
         return cls.from_rotation_and_translation(
             rotation=rotation,
-            translation=np.zeros(
+            translation=torch.zeros(
                 (*rotation.get_batch_axes(), cls.space_dim),
                 dtype=rotation.parameters().dtype,
             ),
@@ -259,27 +159,26 @@ class SEBase(Generic[ContainedSOType], MatrixLieGroup):
 
     @final
     @classmethod
-    def from_translation(cls, translation: npt.NDArray[np.floating]) -> Self:
+    def from_translation(cls, translation: Tensor) -> Self:
         # Extract rotation class from type parameter.
         assert len(cls.__orig_bases__) == 1  # type: ignore
+        identity_cls = get_args(cls.__orig_bases__[0])[0]  # type: ignore
         return cls.from_rotation_and_translation(
-            rotation=get_args(cls.__orig_bases__[0])[0].identity(),  # type: ignore
+            rotation=identity_cls.identity(),
             translation=translation,
         )
 
     @abc.abstractmethod
     def rotation(self) -> ContainedSOType:
-        """Returns a transform's rotation term."""
+        """Returns the rotation component."""
 
     @abc.abstractmethod
-    def translation(self) -> npt.NDArray[np.floating]:
-        """Returns a transform's translation term."""
-
-    # Overrides.
+    def translation(self) -> Tensor:
+        """Returns the translation component."""
 
     @final
     @override
-    def apply(self, target: npt.NDArray[np.floating]) -> npt.NDArray[np.floating]:
+    def apply(self, target: Tensor) -> Tensor:
         return self.rotation() @ target + self.translation()  # type: ignore
 
     @final

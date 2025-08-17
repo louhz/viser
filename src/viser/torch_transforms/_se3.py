@@ -3,8 +3,8 @@ from __future__ import annotations
 import dataclasses
 from typing import Tuple, cast
 
-import numpy as np
-import numpy.typing as npt
+import torch
+from torch import Tensor
 from typing_extensions import override
 
 from . import _base
@@ -12,14 +12,16 @@ from ._so3 import SO3
 from .utils import broadcast_leading_axes, get_epsilon
 
 
-def _skew(omega: npt.NDArray[np.floating]) -> npt.NDArray[np.floating]:
+def _skew(omega: Tensor) -> Tensor:
     """Returns the skew-symmetric form of a length-3 vector."""
-
-    wx, wy, wz = np.moveaxis(omega, -1, 0)
-    zeros = np.zeros_like(wx)
-    return np.stack(
-        [zeros, -wz, wy, wz, zeros, -wx, -wy, wx, zeros],
-        axis=-1,
+    # omega: (..., 3)
+    wx, wy, wz = torch.moveaxis(omega, -1, 0)
+    zeros = torch.zeros_like(wx)
+    return torch.stack(
+        [zeros, -wz, wy,
+         wz, zeros, -wx,
+         -wy, wx, zeros],
+        dim=-1,
     ).reshape((*omega.shape[:-1], 3, 3))
 
 
@@ -32,209 +34,146 @@ class SE3(
     space_dim=3,
 ):
     """Special Euclidean group for proper rigid transforms in 3D. Broadcasting
-    rules are the same as for numpy.
+    rules follow PyTorch semantics."""
 
-    Ported to numpy from `jaxlie.SE3`.
-
-    Internal parameterization is `(qw, qx, qy, qz, x, y, z)`. Tangent parameterization
-    is `(vx, vy, vz, omega_x, omega_y, omega_z)`.
-    """
-
-    # SE3-specific.
-
-    wxyz_xyz: npt.NDArray[np.floating]
-    """Internal parameters. wxyz quaternion followed by xyz translation. Shape should be `(*, 7)`."""
+    wxyz_xyz: Tensor
+    """Internal parameters: quaternion (w,x,y,z) + translation (x,y,z), shape (..., 7)."""
 
     @override
     def __repr__(self) -> str:
-        quat = np.round(self.wxyz_xyz[..., :4], 5)
-        trans = np.round(self.wxyz_xyz[..., 4:], 5)
+        quat = torch.round(self.wxyz_xyz[..., :4], decimals=5)
+        trans = torch.round(self.wxyz_xyz[..., 4:], decimals=5)
         return f"{self.__class__.__name__}(wxyz={quat}, xyz={trans})"
-
-    # SE-specific.
 
     @classmethod
     @override
     def from_rotation_and_translation(
         cls,
         rotation: SO3,
-        translation: npt.NDArray[np.floating],
+        translation: Tensor,
     ) -> SE3:
-        assert translation.shape[-1:] == (3,)
+        assert translation.shape[-1] == 3
         rotation, translation = broadcast_leading_axes((rotation, translation))
-        return SE3(wxyz_xyz=np.concatenate([rotation.wxyz, translation], axis=-1))
+        return SE3(wxyz_xyz=torch.cat([rotation.wxyz, translation], dim=-1))
 
     @override
     def rotation(self) -> SO3:
         return SO3(wxyz=self.wxyz_xyz[..., :4])
 
     @override
-    def translation(self) -> npt.NDArray[np.floating]:
+    def translation(self) -> Tensor:
         return self.wxyz_xyz[..., 4:]
-
-    # Factory.
 
     @classmethod
     @override
     def identity(
-        cls, batch_axes: Tuple[int, ...] = (), dtype: npt.DTypeLike = np.float64
+        cls, batch_axes: Tuple[int, ...] = (), dtype: torch.dtype = torch.float64, device: torch.device | None = None
     ) -> SE3:
+        vec = torch.tensor([1.0, 0, 0, 0, 0, 0, 0], dtype=dtype, device=device)
         return SE3(
-            wxyz_xyz=np.broadcast_to(
-                np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=dtype),
-                (*batch_axes, 7),
-            )
+            wxyz_xyz=vec.broadcast_to((*batch_axes, 7))
         )
 
     @classmethod
     @override
-    def from_matrix(cls, matrix: npt.NDArray[np.floating]) -> SE3:
-        assert matrix.shape[-2:] == (4, 4) or matrix.shape[-2:] == (3, 4)
-        # Currently assumes bottom row is [0, 0, 0, 1].
+    def from_matrix(cls, matrix: Tensor) -> SE3:
+        assert matrix.shape[-2:] in [(4, 4), (3, 4)]
         return SE3.from_rotation_and_translation(
             rotation=SO3.from_matrix(matrix[..., :3, :3]),
             translation=matrix[..., :3, 3],
         )
 
-    # Accessors.
-
     @override
-    def as_matrix(self) -> npt.NDArray[np.floating]:
-        out = np.zeros((*self.get_batch_axes(), 4, 4), dtype=self.wxyz_xyz.dtype)
+    def as_matrix(self) -> Tensor:
+        batch = self.get_batch_axes()
+        dtype = self.wxyz_xyz.dtype
+        device = self.wxyz_xyz.device
+        out = torch.zeros((*batch, 4, 4), dtype=dtype, device=device)
         out[..., :3, :3] = self.rotation().as_matrix()
         out[..., :3, 3] = self.translation()
         out[..., 3, 3] = 1.0
         return out
 
     @override
-    def parameters(self) -> npt.NDArray[np.floating]:
+    def parameters(self) -> Tensor:
         return self.wxyz_xyz
-
-    # Operations.
 
     @classmethod
     @override
-    def exp(cls, tangent: npt.NDArray[np.floating]) -> SE3:
-        # Reference:
-        # > https://github.com/strasdat/Sophus/blob/a0fe89a323e20c42d3cecb590937eb7a06b8343a/sophus/se3.hpp#L761
-
-        # (x, y, z, omega_x, omega_y, omega_z)
-        assert tangent.shape[-1:] == (6,)
-
+    def exp(cls, tangent: Tensor) -> SE3:
+        # tangent: (..., 6)
+        assert tangent.shape[-1] == 6
         rotation = SO3.exp(tangent[..., 3:])
 
-        theta_squared = np.sum(np.square(tangent[..., 3:]), axis=-1)
-        use_taylor = theta_squared < get_epsilon(theta_squared.dtype)
+        theta2 = (tangent[..., 3:] ** 2).sum(dim=-1)
+        use_taylor = theta2 < get_epsilon(theta2.dtype)
 
-        # Shim to avoid NaNs in np.where branches, which cause failures for
-        # reverse-mode AD in JAX. This isn't needed for vanilla numpy.
-        theta_squared_safe = cast(
-            np.ndarray,
-            np.where(
-                use_taylor,
-                np.ones_like(theta_squared),  # Any non-zero value should do here.
-                theta_squared,
-            ),
+        # avoid zeros in denominator
+        theta2_safe = torch.where(
+            use_taylor, torch.ones_like(theta2), theta2
         )
-        del theta_squared
-        theta_safe = np.sqrt(theta_squared_safe)
+        theta_safe = torch.sqrt(theta2_safe)
 
         skew_omega = _skew(tangent[..., 3:])
-        V = np.where(
-            use_taylor[..., None, None],
+        eye3 = torch.eye(3, dtype=tangent.dtype, device=tangent.device)
+
+        V = torch.where(
+            use_taylor.unsqueeze(-1).unsqueeze(-1),
             rotation.as_matrix(),
-            (
-                np.eye(3)
-                + ((1.0 - np.cos(theta_safe)) / (theta_squared_safe))[..., None, None]
-                * skew_omega
-                + (
-                    (theta_safe - np.sin(theta_safe))
-                    / (theta_squared_safe * theta_safe)
-                )[..., None, None]
-                * np.einsum("...ij,...jk->...ik", skew_omega, skew_omega)
-            ),
+            eye3
+            + ((1 - torch.cos(theta_safe)) / theta2_safe).unsqueeze(-1).unsqueeze(-1) * skew_omega
+            + ((theta_safe - torch.sin(theta_safe)) / (theta2_safe * theta_safe))
+              .unsqueeze(-1).unsqueeze(-1)
+              * torch.einsum("...ij,...jk->...ik", skew_omega, skew_omega)
         )
 
-        return SE3.from_rotation_and_translation(
-            rotation=rotation,
-            translation=np.einsum("...ij,...j->...i", V, tangent[..., :3]).astype(
-                tangent.dtype
-            ),
-        )
+        trans = torch.einsum("...ij,...j->...i", V, tangent[..., :3]).to(tangent.dtype)
+        return SE3.from_rotation_and_translation(rotation=rotation, translation=trans)
 
     @override
-    def log(self) -> npt.NDArray[np.floating]:
-        # Reference:
-        # > https://github.com/strasdat/Sophus/blob/a0fe89a323e20c42d3cecb590937eb7a06b8343a/sophus/se3.hpp#L223
+    def log(self) -> Tensor:
         omega = self.rotation().log()
-        theta_squared = np.sum(np.square(omega), axis=-1)
-        use_taylor = theta_squared < get_epsilon(theta_squared.dtype)
+        theta2 = (omega ** 2).sum(dim=-1)
+        use_taylor = theta2 < get_epsilon(theta2.dtype)
 
         skew_omega = _skew(omega)
+        theta2_safe = torch.where(use_taylor, torch.ones_like(theta2), theta2)
+        theta_safe = torch.sqrt(theta2_safe)
+        half_theta = theta_safe / 2
 
-        # Shim to avoid NaNs in np.where branches, which cause failures for
-        # reverse-mode AD in JAX. This isn't needed for vanilla numpy.
-        theta_squared_safe = np.where(
-            use_taylor,
-            np.ones_like(theta_squared),  # Any non-zero value should do here.
-            theta_squared,
-        )
-        del theta_squared
-        theta_safe = np.sqrt(theta_squared_safe)
-        half_theta_safe = theta_safe / 2.0
-
-        V_inv = np.where(
-            use_taylor[..., None, None],
-            np.eye(3)
+        eye3 = torch.eye(3, dtype=omega.dtype, device=omega.device)
+        V_inv = torch.where(
+            use_taylor.unsqueeze(-1).unsqueeze(-1),
+            eye3 - 0.5 * skew_omega + torch.einsum("...ij,...jk->...ik", skew_omega, skew_omega) / 12,
+            eye3
             - 0.5 * skew_omega
-            + np.einsum("...ij,...jk->...ik", skew_omega, skew_omega) / 12.0,
-            (
-                np.eye(3)
-                - 0.5 * skew_omega
-                + (
-                    (
-                        1.0
-                        - theta_safe
-                        * np.cos(half_theta_safe)
-                        / (2.0 * np.sin(half_theta_safe))
-                    )
-                    / theta_squared_safe
-                )[..., None, None]
-                * np.einsum("...ij,...jk->...ik", skew_omega, skew_omega)
-            ),
+            + (((1 - theta_safe * torch.cos(half_theta) / torch.sin(half_theta)) / theta2_safe)
+               .unsqueeze(-1).unsqueeze(-1)
+               * torch.einsum("...ij,...jk->...ik", skew_omega, skew_omega))
         )
-        return np.concatenate(
-            [np.einsum("...ij,...j->...i", V_inv, self.translation()), omega], axis=-1
-        ).astype(self.wxyz_xyz.dtype)
+
+        lin = torch.einsum("...ij,...j->...i", V_inv, self.translation())
+        return torch.cat([lin, omega], dim=-1).to(self.wxyz_xyz.dtype)
 
     @override
-    def adjoint(self) -> npt.NDArray[np.floating]:
+    def adjoint(self) -> Tensor:
         R = self.rotation().as_matrix()
-        return np.concatenate(
-            [
-                np.concatenate(
-                    [R, np.einsum("...ij,...jk->...ik", _skew(self.translation()), R)],
-                    axis=-1,
-                ),
-                np.concatenate(
-                    [np.zeros((*self.get_batch_axes(), 3, 3), dtype=R.dtype), R],
-                    axis=-1,
-                ),
-            ],
-            axis=-2,
-        )
+        t = self.translation()
+        skew_t = _skew(t)
+        upper = torch.cat([R, torch.einsum("...ij,...jk->...ik", skew_t, R)], dim=-1)
+        lower = torch.cat([torch.zeros((*self.get_batch_axes(), 3, 3), device=R.device, dtype=R.dtype), R], dim=-1)
+        return torch.cat([upper, lower], dim=-2)
 
     @classmethod
     @override
     def sample_uniform(
         cls,
-        rng: np.random.Generator,
+        rng: torch.Generator,
         batch_axes: Tuple[int, ...] = (),
-        dtype: npt.DTypeLike = np.float64,
+        dtype: torch.dtype = torch.float64,
+        device: torch.device | None = None,
     ) -> SE3:
-        return SE3.from_rotation_and_translation(
-            rotation=SO3.sample_uniform(rng, batch_axes=batch_axes, dtype=dtype),
-            translation=rng.uniform(low=-1.0, high=1.0, size=(*batch_axes, 3)).astype(
-                dtype=dtype
-            ),
-        )
+        rot = SO3.sample_uniform(rng, batch_axes=batch_axes, dtype=dtype, device=device)
+        shape = (*batch_axes, 3)
+        trans = torch.empty(*shape, dtype=dtype, device=device).uniform_(-1.0, 1.0, generator=rng)
+        return SE3.from_rotation_and_translation(rotation=rot, translation=trans)

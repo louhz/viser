@@ -1,6 +1,52 @@
 # for 4dgs and gui button manipulation 
 
 
+
+# add update cfg for gaussian splats
+
+    # def update_cfg(self, configuration: np.ndarray) -> None:
+    #     """Update the joint angles of the visualized URDF."""
+    #     self._urdf.update_cfg(configuration)
+    #     for joint, frame_handle in zip(self._joint_map_values, self._joint_frames):
+    #         assert isinstance(joint, yourdfpy.Joint)
+    #         T_parent_child = self._urdf.get_transform(
+    #             joint.child, joint.parent, collision_geometry=not self._load_meshes
+    #         )
+    #         frame_handle.wxyz = tf.SO3.from_matrix(T_parent_child[:3, :3]).wxyz
+    #         frame_handle.position = T_parent_child[:3, 3] * self._scale
+
+
+# def create_robot_control_sliders(
+#     server: viser.ViserServer, viser_urdf: ViserUrdf
+# ) -> tuple[list[viser.GuiInputHandle[float]], list[float]]:
+#     """Create slider for each joint of the robot. We also update robot model
+#     when slider moves."""
+#     slider_handles: list[viser.GuiInputHandle[float]] = []
+#     initial_config: list[float] = []
+#     for joint_name, (
+#         lower,
+#         upper,
+#     ) in viser_urdf.get_actuated_joint_limits().items():
+#         lower = lower if lower is not None else -np.pi
+#         upper = upper if upper is not None else np.pi
+#         initial_pos = 0.0 if lower < -0.1 and upper > 0.1 else (lower + upper) / 2.0
+#         slider = server.gui.add_slider(
+#             label=joint_name,
+#             min=lower,
+#             max=upper,
+#             step=1e-3,
+#             initial_value=initial_pos,
+#         )
+#         slider.on_update(  # When sliders move, we update the URDF configuration.
+#             lambda _: viser_urdf.update_cfg(
+#                 np.array([slider.value for slider in slider_handles])
+#             )
+#         )
+#         slider_handles.append(slider)
+#         initial_config.append(initial_pos)
+#     return slider_handles, initial_config
+
+
 """Gaussian splats
 
 Viser includes a WebGL-based Gaussian splat renderer.

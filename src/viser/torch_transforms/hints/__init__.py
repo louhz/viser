@@ -1,12 +1,11 @@
 from typing import Union
 
-import numpy as np
-import numpy.typing as npt
+import torch
 
-# Type aliases Numpy arrays; primarily for function inputs.
+# Type aliases Torch tensors; primarily for function inputs.
 
-Scalar = Union[float, npt.NDArray[np.floating]]
-"""Type alias for `Union[float, Array]`."""
+Scalar = Union[float, torch.Tensor]
+"""Type alias for `Union[float, Tensor]`."""
 
 
 __all__ = [
